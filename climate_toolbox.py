@@ -343,7 +343,7 @@ def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
     Parameters
     ----------
     ps : xarray DataArray
-        2- or 3-D (including time) surface pressure
+        surface pressure
     hyam : xarray DataArray
         1-D hybrid A coefficients on the model levels
     hybm : xarray DataArray
@@ -359,7 +359,7 @@ def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
     Returns
     -------
     p : xarray DataArray
-        3- or 4-D pressure field, with variable name 'P'
+        pressure field, with variable name 'P'
     '''
     p = hyam * p0 + hybm * ps
     if(dims_like is not None):
