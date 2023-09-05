@@ -1,4 +1,4 @@
-`'''
+'''
 This module provides various functions for computing various climate metrics,
 indices, and performing other common tasks on climate or weather data
 '''
@@ -13,11 +13,12 @@ import numpy as np
 import xarray as xr
 from metpy import calc as mc
 from metpy.units import units
+import matplotlib.pyplot as plt
 import metpy.constants as const
 from cftime import DatetimeNoLeap
-
-sys.path.append('/glade/u/home/jhollowed/repos/ncl_exports')
-from wrappers import dpres_hybrid_ccm
+from scipy.linalg import lstsq as lstsq
+from scipy.special import lpmv as legendre
+from numpy.core.multiarray import interp as lininterp
 
 # ===============================================================
 
@@ -107,7 +108,8 @@ def ztop(z):
 # -------------------------------------------------------------
 
 
-def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000):
+def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000, 
+                         vertical_only=False, horizontal_only=False):
     '''
     Computes a spatially-weighted statistic of X in lat-lon coordinates. 
     Data values are weighted in the vertical direction by pressure 
@@ -119,7 +121,8 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000):
     B: If the spatial dimensions include ('lev'), a pressure-weighted 
        statistic is computed and returned.
     C: If the spatial dimensions include ('lat', 'lev'), a volume-weighted 
-       statistic is computed and returned.
+       statistic is computed and returned, unless either vertical_only or
+       horizontal_only are True.
     - If the input data X suggests use case B or C, then the optional arguments
       (ps, hyai, hybi) become required.
     - Any extra dimensions (e.g. 'time') may also be present, though they will be
@@ -143,6 +146,10 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000):
         Required if X includes the dimension 'lev'
     p0 : float, optional
         reference pressure in Pa. Defaults to 100000 Pa.
+    vertical_only : bool
+        whether or not to take the weighted statistic only in the vertical
+    horizontal_only : bool
+        whether or not to take the weighted statistic only in the horizontal
         
     Returns
     -------
@@ -179,8 +186,8 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000):
     # dimensions of X_stat and PS agree
     X_stat = X
     
-    # ---- if data has vertical dimension, weight in lev, sum in lev
-    if(len(vert_dims) > 0):
+    # ---- if data has vertical dimension, weight in lev, apply stat in lev
+    if(len(vert_dims) > 0 and not horizontal_only):
         # data has lev; weight
         lev_weights = compute_hybrid_pressure_thickness(ps, hyai, hybi, 
                                                         dims_like=X_stat)
@@ -188,8 +195,9 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000):
         X_weighted = X_stat.weighted(lev_weights)
         X_stat = stat_func(X_weighted, vert_dims)
     
-    # ---- if data has horizontal dimensions, weight in latitude, sum in lat,lon
-    if(len(horz_dims) > 0):
+    # ---- if data has horizontal dimensions, weight in latitude, 
+    #      apply stat in lat,lon
+    if(len(horz_dims) > 0 and not vertical_only):
         if('lat' in horz_dims):
             # data has lat; weight
             lat_weights = np.cos(np.deg2rad(X.lat))
@@ -449,60 +457,17 @@ def compute_theta(T, ps, hyai, hybi, pref=100000):
     pref : float, optional
         reference pressure for potential temperature, in Pa. 
         Defaults to 100000 Pa.
+
+    Returns
+    -------
+    theta : xarray DataArray
+        the potential temperature
     '''
     
     p = compute_hybrid_pressure(ps, hyai, hybi, dims_like = T)
     theta = T * (pref/p)**(const.kappa)
     theta.name = 'THETA'
     return theta
-    
-# -------------------------------------------------------------
-
-
-def compute_climatology(data, ncdf_out=None):
-    '''
-    Compute the monthly climatology on the data
-
-    Parameters
-    ----------
-    data : xarray Dataset, xarray DataArray, or string
-        An xarray object containing the data, or path to the file as a string. 
-        Must include times with at least monthly resolution.
-    ncdf_out : string, optional
-        The file to write the resulting climatology data out to.
-        Default is None, in which case nothing is written out. 
-        If the file exists, read it in and return, rather than computing 
-        the climatology, unless overwrite is True.
-    overwrite : bool
-        Whether or not to overwrite the contents of ncdf_out.
-        Defaults to False, in which case the contents of the
-        file area read in and returned instead of computing anything.
-
-    Returns
-    -------
-        climatology : xarray data object
-            The monthly climatology from the input data
-    '''
-
-    # --- check inputs
-    data = check_data_inputs(data)
-        
-    if(ncdf_out is not None):
-        if(overwrite): 
-            try: os.remove(ncdf_out)
-            except OSError: pass
-        try: 
-            climatology = xr.open_dataset(ncdf_out)
-            print('Read climatology data from file {}'.format(ncdf_out.split('/')[-1]))
-            return climatology
-        except FileNotFoundError:
-            pass
-
-    # --- compute climatology 
-    climatology = data.groupby('time.month').mean('time')
-    if(ncdf_out is not None):
-        climatology.to_netcdf(ncdf_out, format='NETCDF4')
-    return climatology
 
 
 # -------------------------------------------------------------
@@ -553,6 +518,189 @@ def compute_vorticity(data, ncdf_out=None, overwrite=False):
     if(ncdf_out is not None):
         vort.to_netcdf(ncdf_out)
     return vort
+
+
+# -------------------------------------------------------------
+
+
+def unstructured_zonalmean_remap_matrix(lat, lat_out, L):
+    '''
+    This function generates a zonal mean remap matrix using spherical harmonic decomposition 
+    given a latitude, output latitude, and degree (L). Ported MATLAB code from Tom Ehrmann.
+
+    Parameters
+    ----------
+    lat : 1D array
+        unstructured latitudes of the native data
+    lat_out : 1D array
+        structured latitude discretization used for remap
+    L : int
+        maximum spherical harmonic order
+
+    Returns
+    -------
+    ??
+    '''
+
+    NN  = len(lat)              # number of input data points
+    NNN = len(lat_out)          # number of output data points
+    LL  = sum([*range(1,L+2)])  # sum of all L's; total number of (l,m) pairs
+
+    l  = np.zeros(LL)           # spherical harmonic degree
+    m  = np.zeros(LL)           # spherical harmonic order (positive m only)
+    L0 = L + 1                  # order plus one
+
+    Y0 = np.zeros((L0, NN))     # matrix to store spherical harmonics on input lats 
+    P0 = np.zeros((LL, NN))     # matrix to store legendre polynomials on input lats
+    Y1 = np.zeros((L0, NNN))    # matrix to store spherical harmonics on output lats 
+    P1 = np.zeros((LL, NNN))    # matrix to store legendre polynomials on output lats
+
+    # ---- build l,m matrices
+    # ---- compute legendre polynomials for each degree l at input lats
+    sinlat = np.sin(np.deg2rad(lat))
+    for ll in range(L+1):
+        for mm in range(ll+1):
+            idx = sum([*range(1,ll+1)])+mm
+            l[idx] = ll
+            m[idx] = mm
+            P0[idx,:] = legendre(mm, ll, sinlat)
+
+    # ---- compute zeroth-order spherical harmonics Y[l,m=0] ]at the input lats
+    l0 = 0
+    for ll in range(LL):
+        if(m[ll] == 0):
+            coef = np.sqrt(((2*l[ll]+1)/(2*np.pi)))
+            Y = coef * P0[ll,:]
+            Y0[l0,:] = Y
+            l0 = l0+1
+    
+    # ---- compute legendre polynomials for each degree l at output lats
+    sinlat = np.sin(np.deg2rad(lat_out))
+    for ll in range(L+1):
+        for mm in range(ll+1):
+            idx = sum([*range(1,ll+1)])+mm
+            P1[idx,:] = legendre(mm, ll, sinlat)
+    
+    # ---- compute zeroth-order spherical harmonics Y[l,m=0] ]at the input lats
+    l0 = 0
+    for ll in range(LL):
+        if(m[ll] == 0):
+            coef = np.sqrt(((2*l[ll]+1)/(2*np.pi)))
+            Y = coef * P1[ll,:]
+            Y1[l0,:] = Y
+            l0 = l0+1
+
+    # ---- construct the remap matrices
+    #
+    # ZM is a matrix that transforms lat -> lat_out, where ZM = Y1 * inv(Y0).
+    # Each operation of the matrix mutliplication between Y1 and inv(Y0) is a dot product;
+    # in other words, we are *projecting* the zonally-symmetric spherical harmonic decomposition 
+    # at lat, onto that at lat_out.
+    # Note that if the system in the matric inversion problem (i.e. the call to lstsq below)
+    # is underdetermined (i.e. L > len(lat)), then there will be multiple solutions. In this
+    # case, the solution of this code will differ from Tom's Matlab implementation. Why? When 
+    # needing to choose to return one of many solutions, The "mldivide" operator in Matlab 
+    # returns the solution with as many zeros as possible, while Scipy's lstsq returns the 
+    # solution of minimal norm. These may not always be the same. To avoid this undetermined 
+    # situation, ensure that L<len(lat).
+    # https://stackoverflow.com/questions/33559946/numpy-vs-mldivide-matlab-operator
+    #
+    # ZM_nat is a matrix which "transforms" lat -> lat, where ZM = Y0 * inv(Y0).
+    # I don't see what this is useful for beyond a validation that the matrix inversion
+    # is correct; it seems that ZM_nat should always be the identity matrix, in this case.
+    ZM     = np.matmul(Y1.T, lstsq(Y0.T, np.identity(NN))[0])
+    ZM_nat = np.matmul(Y0.T, lstsq(Y0.T, np.identity(NN))[0])
+    pdb.set_trace()
+    return [ZM, ZM_nat]
+
+float_formatter = "{:.4f}".format
+np.set_printoptions(formatter={'float_kind':float_formatter})
+ZM, ZM_nat = unstructured_zonalmean_remap_matrix([-66,2,35,15], [-20,0,20], 2)
+
+
+
+
+
+
+# -------------------------------------------------------------
+
+
+def interp_to_isentropes(theta, x, isentropes, vdimn='lev', tdimn='time', hdimn='ncol'):
+    '''
+    Interpolates a variable x to isentropes
+    TODO: currently assumes unstructured horizontal data
+    
+    Parameters
+    ----------
+    theta : xarray DataArray
+        potential temperature
+    x : xarray DataArray
+        variable to interpolate
+    isentropes : float list
+        list of isentrope levels to interpolate to
+    
+    Returns
+    -------
+    The interpolated varibale x at the isentrope levels 
+    '''
+    vdim = x.dims.index(vdimn)
+    tdim = x.dims.index(tdimn)
+    hdim = x.dims.index(hdimn)
+
+    for j in range(x.shape[tdim]):
+        print('----- {}'.format(j), end='\r')
+        for thetap in isentropes:
+            np.concatenate([lininterp(theta[i], thetap, x[i]) for i in range(x.shape[hdim])])
+   
+
+
+# -------------------------------------------------------------
+
+
+def compute_climatology(data, ncdf_out=None):
+    '''
+    Compute the monthly climatology on the data
+
+    Parameters
+    ----------
+    data : xarray Dataset, xarray DataArray, or string
+        An xarray object containing the data, or path to the file as a string. 
+        Must include times with at least monthly resolution.
+    ncdf_out : string, optional
+        The file to write the resulting climatology data out to.
+        Default is None, in which case nothing is written out. 
+        If the file exists, read it in and return, rather than computing 
+        the climatology, unless overwrite is True.
+    overwrite : bool
+        Whether or not to overwrite the contents of ncdf_out.
+        Defaults to False, in which case the contents of the
+        file area read in and returned instead of computing anything.
+
+    Returns
+    -------
+        climatology : xarray data object
+            The monthly climatology from the input data
+    '''
+
+    # --- check inputs
+    data = check_data_inputs(data)
+        
+    if(ncdf_out is not None):
+        if(overwrite): 
+            try: os.remove(ncdf_out)
+            except OSError: pass
+        try: 
+            climatology = xr.open_dataset(ncdf_out)
+            print('Read climatology data from file {}'.format(ncdf_out.split('/')[-1]))
+            return climatology
+        except FileNotFoundError:
+            pass
+
+    # --- compute climatology 
+    climatology = data.groupby('time.month').mean('time')
+    if(ncdf_out is not None):
+        climatology.to_netcdf(ncdf_out, format='NETCDF4')
+    return climatology
 
 
 # -------------------------------------------------------------
@@ -834,81 +982,8 @@ def ensemble_mean(ensemble, std=False, incl_vars=None, outFile=None, overwrite=F
     -------
     ensembleMean : xarray Dataset or list of xarray Datasets
         If std==False, the ensemble mean of the input ensemble members
-        If std==True, a list of two elements. Item at position 0 is the
-            ensemble mean of the inpit ensemble membersm, item at position 1 
-            is the standard deviation of the ensemble members
     '''
-    
-    # ---- read mean,std from file if exists and return
-    if(outFile is not None):
-        outFile_std = '{}.std'.format(outFile)
-        if(overwrite): 
-            try: os.remove(outFile)
-            except OSError: pass
-            try: os.remove(outFile_std)
-            except OSError: pass
-        try: 
-            ensMean = xr.open_dataset(outFile)
-            print('---Read data from file {}'.format(outFile.split('/')[-1]))
-            if(std):
-                ensStd = xr.open_dataset(outFile_std)
-                print('--- Read data from file {}'\
-                      .format(outFile_std.split('/')[-1]))
-                return [ensMean, ensStd]
-            else:
-                return ensMean
-        except FileNotFoundError:
-            pass
-    
-    # ---- check input
-    pdb.set_trace()
-    N = len(ensemble)
-    ens = np.empty(N, dtype=object)
-    ens[0] = check_data_inputs(ensemble[0])
-    if(incl_vars is None):
-        all_vars = sorted(list(ens[0].keys()))
-        all_vars = [l.isupper() for l in all_vars]
-    else:
-        all_vars = incl_vars
-    
-    for i in range(N-1):
-        print('opening ens {}...'.format(i), end='\r', flush=True)
-        ens[i+1] = check_data_inputs(ensemble[i+1])
-        assert np.sum([vv in sorted(list(ens[i+1].keys())) \
-                       for vv in all_vars]) == len(all_vars),\
-                       'not all ensemble members contain these'\
-                       'variables:\n{}'.format(all_vars)
-    pdb.set_trace()
-
-    # ---- sum members
-    ensMean = ens[0]
-    if(std): rms = ens[0]**2
-    for i in range(len(ens)-1):
-        print('--- summing ensemble {}...'.format(i))
-        ensMean = xr.concat([ensMean, ens[i+1]], dim='ens', data_vars=all_vars,
-                             compat='override', coords='minimal')
-        ensMean = ensMean.sum('ens')
-        if(std):
-            pdb.set_trace()
-            rms = rms + ens[i+1]**2
-
-    print('---taking ensemble mean...')
-    ensMean = ensMean / len(ens)
-    if(std): ensStd = np.sqrt( rms/len(ens) - ensMean**2)
-
-    # ---- write out, return
-    if(outFile is not None):
-        ensMean.to_netcdf(outFile)
-        print('--- Wrote ensemble data to file {}'\
-              .format(outFile.split('/')[-1]))
-        if(std):
-            ensStd.to_netcdf(outFile_std)
-            print('--- Wrote ensemble std data to '\
-                  'file {}'.format(outFile.split('/')[-1]))
-    if(std):    
-        return ensMean, ensStd
-    else:
-        return ensMean
+    # TODO
 
 
 # -------------------------------------------------------------
@@ -955,80 +1030,6 @@ def concat_run_outputs(run, sel={}, mean=[], outFile=None, overwrite=False,
         Concatenate data for this component (will look for files with
         [component].h[histnum]). Defaults to 'cam'
     '''
-   
-    run_name = run.rstrip('/').split('/')[-2]
- 
-    print('\n\n========== Concatenating data at {} =========='.format(run_name))
-  
-    if(regridded):
-        hist = sorted(glob.glob('{}/*{}.h{}*regrid*.nc'\
-                                .format(run, component, histnum)))
-    else:
-        hist = sorted(glob.glob('{}/*{}.h{}*0.nc'\
-                                .format(run, component, histnum)))
-    
-    # remove outFile from glob results, if present
-    try: hist.remove(outFile)
-    except ValueError: pass
-    hist = np.array(hist)
-    assert len(hist) > 0, 'no history files found at {} for regridded={}'.format(run, regridded)
-    
-    print('Found {} files for history group h{}'.format(len(hist), histnum))
-    
-    # --- read concatenation from file if exists
-    if(outFile is not None):
-        if(overwrite): 
-            try: os.remove(outFile)
-            except OSError: pass
-        try: 
-            allDat = xr.open_dataset(outFile)
-            print('Read data from file {}'.format(outFile.split('/')[-1]))
-            return allDat
-        except FileNotFoundError:
-            pass
-        
-    # ---- concatenate
-    allDat_set = False
-    for j in range(len(hist)):
-        print('------ working on file {} ------'\
-              .format(hist[j].split('/')[-1]))
-        skip=False
-
-        # open dataset, select data
-        # (temporary catch because of annoying xarray warning)
-        with warnings.catch_warnings():  
-            warnings.simplefilter('ignore', FutureWarning)
-            dat = xr.open_dataset(hist[j])
-            
-            # ------ sel
-            for dim in sel.keys():
-                try:
-                    dat = dat.sel({dim:sel[dim]}, method='nearest')
-                except NotImplementedError:
-                    dat = dat.sel({dim:sel[dim]})
-                # if all data was removed after the slice, continue
-                # !!! generalize this at some point, for data that has no U
-                if(len(dat['U']) == 0):
-                    skip=True
-                    break
-            if(skip==True): continue
-
-        if(not allDat_set): 
-            allDat = dat
-            allDat_set = True
-        else: 
-            allDat = xr.concat([allDat, dat], 'time')
-  
-    # ------ take means
-    for dim in mean:
-        allDat = allDat.mean(dim)
-   
-    # ------ done; write out and return
-    if(outFile is not None):
-        allDat.to_netcdf(outFile)
-        print('Wrote data to file {}'.format(outFile.split('/')[-1]))
-
-    return allDat
-        
+    # TODO 
 
 # -----------------------------------------------------------------
