@@ -555,6 +555,7 @@ def unstructured_zonalmean_remap_matrix(lat, lat_out, L):
     Y1 = np.zeros((L0, NNN))    # matrix to store spherical harmonics on output lats 
     P1 = np.zeros((LL, NNN))    # matrix to store legendre polynomials on output lats
 
+
     # ---- build l,m matrices
     # ---- compute legendre polynomials for each degree l at input lats
     sinlat = np.sin(np.deg2rad(lat))
