@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import metpy.constants as const
 from cftime import DatetimeNoLeap
 from scipy.linalg import lstsq as lstsq
-from scipy.special import lpmv as legendre
+from scipy.special import eval_legendre as legendre
 from numpy.core.multiarray import interp as lininterp
 
 # ===============================================================
@@ -57,7 +57,7 @@ def time2day(time):
 # -------------------------------------------------------------
 
 
-def ptoz(p):
+def ptoz(p, T0=250, P0=1000):
     '''
     Converts pressure to geopotential height assuming an isothermal atmosphere
 
@@ -65,6 +65,10 @@ def ptoz(p):
     ----------
     p : float or float array
         pressure in hPa
+    T0 : float, optional
+        refernce temperature in kelvin. Defaults to 250 K
+    P0 : float, optional
+        reference pressure in hPa. Defaults to 1000 hPa
 
     Returns
     -------
@@ -73,11 +77,11 @@ def ptoz(p):
     '''
     try: _ = p.m
     except: p = p*units.hPa
-    P0 = 1000*units.hPa
-    T0 = 250*units.K 
+    P0 = P0*units.hPa 
+    T0 = T0*units.K
     #T0 = 185.5*units.K # temporary to force 25km to match 10hPa for plume
     H = const.Rd*T0/const.g 
-    return H * np.log(P0/p)
+    return (H * np.log(P0/p)).to(units.m)
 
 
 # -------------------------------------------------------------
@@ -103,6 +107,43 @@ def ztop(z):
     T0 = 250*units.K
     H = const.Rd*T0/const.g 
     return P0 * np.exp(-z/H)
+
+
+# -------------------------------------------------------------
+
+
+def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
+    '''
+    Computes the gridpoint pressure on a hybrid pressure coordinate.
+    
+    Parameters
+    ----------
+    ps : xarray DataArray
+        surface pressure in Pa
+    hyam : xarray DataArray
+        1-D hybrid A coefficients on the model levels
+    hybm : xarray DataArray
+        1-D hybrid B coefficients on the model levels
+    dims_like : xarray DataArray, optional
+        pressure data will be transposed such that it's 
+        order of dimensions (and thus shape) matches this
+        template DataArray. Defaults to None, in which case
+        no transpose is performed.
+    p0 : float, optional
+        reference pressure in Pa. Defaults to 100000 Pa.
+        
+    Returns
+    -------
+    p : xarray DataArray
+        pressure field, with variable name 'P'
+    '''
+    p = hyam * p0 + hybm * ps
+    if(dims_like is not None):
+        p = p.transpose(*dims_like.dims)
+    p.name = 'P'
+    p.attrs['units'] = 'Pa'
+    p.attrs['long_name'] = 'Air pressure'
+    return p
 
 
 # -------------------------------------------------------------
@@ -344,41 +385,6 @@ def native_weighted_mean(X, horz_weights=None,
 # -------------------------------------------------------------
 
 
-def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
-    '''
-    Computes the gridpoint pressure on a hybrid pressure coordinate.
-    
-    Parameters
-    ----------
-    ps : xarray DataArray
-        surface pressure
-    hyam : xarray DataArray
-        1-D hybrid A coefficients on the model levels
-    hybm : xarray DataArray
-        1-D hybrid B coefficients on the model levels
-    dims_like : xarray DataArray, optional
-        pressure data will be transposed such that it's 
-        order of dimensions (and thus shape) matches this
-        template DataArray. Defaults to None, in which case
-        no transpose is performed.
-    p0 : float, optional
-        reference pressure in Pa. Defaults to 100000 Pa.
-        
-    Returns
-    -------
-    p : xarray DataArray
-        pressure field, with variable name 'P'
-    '''
-    p = hyam * p0 + hybm * ps
-    if(dims_like is not None):
-        p = p.transpose(*dims_like.dims)
-    p.name = 'P'
-    return p
-
-
-# -------------------------------------------------------------
-
-
 def compute_hybrid_pressure_thickness(ps, hyai, hybi, 
                                       dims_like=None, lev=None, p0=100000):
     '''
@@ -523,81 +529,55 @@ def compute_vorticity(data, ncdf_out=None, overwrite=False):
 # -------------------------------------------------------------
 
 
-def unstructured_zonalmean_remap_matrix(lat, lat_out, L):
+def unstructured_zonalmean_remap_matrix(lat, L, lat_out = None):
     '''
     This function generates a zonal mean remap matrix using spherical harmonic decomposition 
-    given a latitude, output latitude, and degree (L). Ported MATLAB code from Tom Ehrmann.
+    given latitudes and degree (L). It is also optional to specify a spearate set of output 
+    latitudes, in which case remap matrices will be returned for zonally averaging data on the
+    input "native" latitudes, as well as the specified output latitudes. 
+    Ported MATLAB code from Tom Ehrmann.
 
     Parameters
     ----------
     lat : 1D array
-        unstructured latitudes of the native data
-    lat_out : 1D array
-        structured latitude discretization used for remap
+        unstructured vector of N latitudes of the native data
     L : int
         maximum spherical harmonic order
+    lat_out : 1D array
+        structured vector of NN latitudes used for optional remap
 
     Returns
     -------
-    ??
+    ZM, or [ZM_nat, ZM] : NxN array, or list of [NxN, NNxNN] arrays
+        ZM_nat: The resulting square (NxN) zonal averaging matrix
+        ZM:     The resulting square (NNxNN) zonal averaging remap matrix
     '''
 
-    NN  = len(lat)              # number of input data points
-    NNN = len(lat_out)          # number of output data points
-    LL  = sum([*range(1,L+2)])  # sum of all L's; total number of (l,m) pairs
-
-    l  = np.zeros(LL)           # spherical harmonic degree
-    m  = np.zeros(LL)           # spherical harmonic order (positive m only)
-    L0 = L + 1                  # order plus one
-
-    Y0 = np.zeros((L0, NN))     # matrix to store spherical harmonics on input lats 
-    P0 = np.zeros((LL, NN))     # matrix to store legendre polynomials on input lats
-    Y1 = np.zeros((L0, NNN))    # matrix to store spherical harmonics on output lats 
-    P1 = np.zeros((LL, NNN))    # matrix to store legendre polynomials on output lats
-
-
-    # ---- build l,m matrices
-    # ---- compute legendre polynomials for each degree l at input lats
+    l  = np.arange(L+1)         # spherical harmonic degree
+    
+    # ---- compute zeroth-order spherical harmonics Y[l,m=0] ]at the input lats
+    N  = len(lat)              # number of input data points
+    Y0 = np.zeros((N, L+1))    # matrix to store spherical harmonics on input lats 
     sinlat = np.sin(np.deg2rad(lat))
-    for ll in range(L+1):
-        for mm in range(ll+1):
-            idx = sum([*range(1,ll+1)])+mm
-            l[idx] = ll
-            m[idx] = mm
-            P0[idx,:] = legendre(mm, ll, sinlat)
-
-    # ---- compute zeroth-order spherical harmonics Y[l,m=0] ]at the input lats
-    l0 = 0
-    for ll in range(LL):
-        if(m[ll] == 0):
-            coef = np.sqrt(((2*l[ll]+1)/(2*np.pi)))
-            Y = coef * P0[ll,:]
-            Y0[l0,:] = Y
-            l0 = l0+1
+    for ll in l:
+        coef = np.sqrt(((2*ll+1)/(4*np.pi)))
+        Y0[:,ll] = coef * legendre(ll, sinlat)
     
-    # ---- compute legendre polynomials for each degree l at output lats
-    sinlat = np.sin(np.deg2rad(lat_out))
-    for ll in range(L+1):
-        for mm in range(ll+1):
-            idx = sum([*range(1,ll+1)])+mm
-            P1[idx,:] = legendre(mm, ll, sinlat)
-    
-    # ---- compute zeroth-order spherical harmonics Y[l,m=0] ]at the input lats
-    l0 = 0
-    for ll in range(LL):
-        if(m[ll] == 0):
-            coef = np.sqrt(((2*l[ll]+1)/(2*np.pi)))
-            Y = coef * P1[ll,:]
-            Y1[l0,:] = Y
-            l0 = l0+1
+    if(lat_out is not None):
+        # ---- compute legendre polynomials for each degree l at output lats
+        NN = len(lat_out)          # number of output data points
+        Y1 = np.zeros((NN, L+1))   # matrix to store spherical harmonics on output lats 
+        sinlat = np.sin(np.deg2rad(lat_out))
+        for ll in l:
+            coef = np.sqrt(((2*ll+1)/(4*np.pi)))
+            Y1[:,ll] = coef * legendre(ll, sinlat)
 
     # ---- construct the remap matrices
     #
-    # ZM is a matrix that transforms lat -> lat_out, where ZM = Y1 * inv(Y0).
-    # Each operation of the matrix mutliplication between Y1 and inv(Y0) is a dot product;
-    # in other words, we are *projecting* the zonally-symmetric spherical harmonic decomposition 
-    # at lat, onto that at lat_out.
-    # Note that if the system in the matric inversion problem (i.e. the call to lstsq below)
+    # ZM recovers the zonal mean on a reduced grid with M data points 
+    # ZM_nat recovers the zonal mean on the native grid with N data points 
+    #
+    # Note that if the system in the matrix inversion problem (i.e. the call to lstsq below)
     # is underdetermined (i.e. L > len(lat)), then there will be multiple solutions. In this
     # case, the solution of this code will differ from Tom's Matlab implementation. Why? When 
     # needing to choose to return one of many solutions, The "mldivide" operator in Matlab 
@@ -605,22 +585,13 @@ def unstructured_zonalmean_remap_matrix(lat, lat_out, L):
     # solution of minimal norm. These may not always be the same. To avoid this undetermined 
     # situation, ensure that L<len(lat).
     # https://stackoverflow.com/questions/33559946/numpy-vs-mldivide-matlab-operator
-    #
-    # ZM_nat is a matrix which "transforms" lat -> lat, where ZM = Y0 * inv(Y0).
-    # I don't see what this is useful for beyond a validation that the matrix inversion
-    # is correct; it seems that ZM_nat should always be the identity matrix, in this case.
-    ZM     = np.matmul(Y1.T, lstsq(Y0.T, np.identity(NN))[0])
-    ZM_nat = np.matmul(Y0.T, lstsq(Y0.T, np.identity(NN))[0])
-    pdb.set_trace()
-    return [ZM, ZM_nat]
-
-float_formatter = "{:.4f}".format
-np.set_printoptions(formatter={'float_kind':float_formatter})
-ZM, ZM_nat = unstructured_zonalmean_remap_matrix([-66,2,35,15], [-20,0,20], 2)
-
-
-
-
+    Y0inv = lstsq(Y0, np.identity(N))[0]
+    ZM_nat = np.matmul(Y0, Y0inv)
+    if(lat_out is not None):
+        ZM     = np.matmul(Y1, Y0inv)
+        pdb.set_trace()
+        return [ZM_nat, ZM]
+    return ZM_nat
 
 
 # -------------------------------------------------------------

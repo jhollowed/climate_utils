@@ -2,6 +2,7 @@ import os
 import sys
 import pdb
 import glob
+import pathlib
 import warnings
 import numpy as np
 import xarray as xr
@@ -14,11 +15,12 @@ from matplotlib.colors import ListedColormap
 from matplotlib.offsetbox import AnchoredText
 
 _DEGREE_SYMBOL = u'\u00B0'
+_CMAP_DIR = '{}/ncl_cmaps'.format(pathlib.Path(__file__).parent.resolve())
 
 # ==========================================================================================
 
 
-def ncar_rgb_to_cmap(rgb, hdrl=2):
+def ncl_rgb_to_cmap(rgb, hdrl=2):
     '''
     Constructs matplotlib colormap object from NCAR .rgb file
 
@@ -39,10 +41,19 @@ def ncar_rgb_to_cmap(rgb, hdrl=2):
     colors = colors[hdrl:]
     for i in range(len(colors)):
         colors[i] = [float(c) for c in colors[i].strip('\n').split('#')[0].split()]
-    colors = np.array(colors)
+    colors = np.array([color for color in colors if not len(color) == 0])
     if(np.max(colors) > 1):
         colors /= 256
     return ListedColormap(colors)
+
+GMT_no_green         = ncl_rgb_to_cmap('{}/GMT_no_green.rgb'.format(_CMAP_DIR))
+GMT_panoply          = ncl_rgb_to_cmap('{}/GMT_panoply.rgb'.format(_CMAP_DIR))
+ncl_default          = ncl_rgb_to_cmap('{}/ncl_default.rgb'.format(_CMAP_DIR))
+nrl_sirkes_nowhite   = ncl_rgb_to_cmap('{}/nrl_sirkes_nowhite.rgb'.format(_CMAP_DIR))
+nrl_sirkes           = ncl_rgb_to_cmap('{}/nrl_sirkes.rgb'.format(_CMAP_DIR))
+BlueWhiteOrangeRed   = ncl_rgb_to_cmap('{}/BlueWhiteOrangeRed.rgb'.format(_CMAP_DIR))
+WhiteYellowOrangeRed = ncl_rgb_to_cmap('{}/WhiteYellowOrangeRed.rgb'.format(_CMAP_DIR))
+cmocean_matter       = ncl_rgb_to_cmap('{}/cmocean_matter.rgb'.format(_CMAP_DIR))
 
 
 # -------------------------------------------------------------

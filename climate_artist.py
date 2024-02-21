@@ -372,7 +372,8 @@ def horizontal_slice(x, y, var_dict, ax, projection=ccrs.PlateCarree(), include_
                      grid=True, gridArgs=None, coastlines=True, coastlinesArgs=None, 
                      annotation=None, annotation_loc='lower left', annotation_alpha=1, 
                      annotation_bbox=None, include_contour_labels = False,
-                     no_yticklabs=False, no_xticklabs=False, cbar_ticks_match_levels=True):
+                     no_yticklabs=False, no_xticklabs=False, cbar_ticks_match_levels=True, 
+                     top_labels=False, bottom_labels=True, right_labels=False, left_labels=True):
     '''
     Plot the 2D horizontal slice of a variable
 
@@ -695,8 +696,10 @@ def horizontal_slice(x, y, var_dict, ax, projection=ccrs.PlateCarree(), include_
     if(grid):
         if(is_geoaxis):
             gl = ax.gridlines(**gridArgs)
-            gl.xlabels_top = False
-            gl.ylabels_right = False
+            gl.top_labels    = top_labels
+            gl.bottom_labels = bottom_labels
+            gl.right_labels  = right_labels
+            gl.left_labels   = left_labels
         else:
             ax.grid(**gridArgs)
     if(coastlines):
