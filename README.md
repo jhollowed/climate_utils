@@ -15,3 +15,12 @@ pip install -e .
 ```
 
 The `-e` flag to `pip install` installs the package with a symlink to the soruce code, so that later updates via git pull do not require re-installation.
+
+## Usage:
+
+Import the functions as e.g.
+
+```import climate_utils.climate_toolbox as ctb
+   import climate_utils.climate_artist as cart
+   import climate_utils.artist_utils as aut
+'''
