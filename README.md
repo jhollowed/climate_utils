@@ -20,7 +20,8 @@ The `-e` flag to `pip install` installs the package with a symlink to the soruce
 
 Import the functions as e.g.
 
-```import climate_utils.climate_toolbox as ctb
-   import climate_utils.climate_artist as cart
-   import climate_utils.artist_utils as aut
+```python
+import climate_utils.climate_toolbox as ctb
+import climate_utils.climate_artist as cart
+import climate_utils.artist_utils as aut
 '''
