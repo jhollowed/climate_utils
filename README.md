@@ -8,7 +8,7 @@ See docstrings at function definitions for arguments and usage
 1. Configure Conda environment for access to needed dependencies
 
    ```bash
-   conda create -n climo-env -c conda-forge python=3.11 xesmf esmpy esmf matplotlib
+   conda create -n climo-env -c conda-forge python=3.11 xesmf esmpy esmf netcdf4 matplotlib
    conda activate climo_env
    ```
 
