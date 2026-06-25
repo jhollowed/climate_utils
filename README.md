@@ -16,12 +16,12 @@ See docstrings at function definitions for arguments and usage
 
 3. Locally install the package
 
-```bash
-cd climate_utils
-pip install -e .
-```
+   ```bash
+   cd climate_utils
+   pip install -e .
+   ```
 
-The `-e` flag to `pip install` installs the package with a symlink to the soruce code, so that later updates via git pull do not require re-installation.
+   The `-e` flag to `pip install` installs the package with a symlink to the soruce code, so    that later updates via git pull do not require re-installation.
 
 ## Usage:
 
