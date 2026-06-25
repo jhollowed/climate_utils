@@ -112,6 +112,33 @@ def ztop(z):
 # -------------------------------------------------------------
 
 
+def conservative_regrid(template, ncin):
+    '''
+    calls xESMF to perform a conservative horizontal remap
+
+    Parameters
+    ----------
+    template : xarray DataArray
+        A template dataset defined on the desired destination grid.
+        The specific data and any dimensions other than lat,lon here do not matter.
+    ncin : DataArray
+        Input netcdf file on the original grid.
+
+    Returns
+    -------
+    ncout : xarray DataArray
+        The input data regridded to the template lat,lon grid
+    '''
+    dest_grid = xr.Dataset({'lat':(['lat'], template.lat.values), 
+                            'lon':(['lon'], template.lon.values)})
+    regridder = xe.Regridder(ncin, dest_grid, 'conservative')
+    ncout = regridder(ncin, keep_attrs=True)
+    return ncout
+
+
+# -------------------------------------------------------------
+
+
 def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
     '''
     Computes the gridpoint pressure on a hybrid pressure coordinate.
