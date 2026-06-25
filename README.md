@@ -5,9 +5,16 @@ See docstrings at function definitions for arguments and usage
 
 ## Installation:
 
-1. Clone the package
+1. Configure Conda environment for access to needed dependencies
 
-2. Locally install the package
+   ```bash
+   conda create -n climo-env -c conda-forge python=3.11 xesmf esmpy esmf matplotlib
+   conda activate climo_env
+   ```
+
+2. Clone the package
+
+3. Locally install the package
 
 ```bash
 cd climate_utils
