@@ -7,9 +7,11 @@ import os
 import sys
 import pdb
 import glob
+import metpy
 import cftime
 import warnings
 import numpy as np
+import xesmf as xe
 import xarray as xr
 from metpy import calc as mc
 from metpy.units import units
@@ -112,33 +114,6 @@ def ztop(z):
 # -------------------------------------------------------------
 
 
-def conservative_regrid(template, ncin):
-    '''
-    calls xESMF to perform a conservative horizontal remap
-
-    Parameters
-    ----------
-    template : xarray DataArray
-        A template dataset defined on the desired destination grid.
-        The specific data and any dimensions other than lat,lon here do not matter.
-    ncin : DataArray
-        Input netcdf file on the original grid.
-
-    Returns
-    -------
-    ncout : xarray DataArray
-        The input data regridded to the template lat,lon grid
-    '''
-    dest_grid = xr.Dataset({'lat':(['lat'], template.lat.values), 
-                            'lon':(['lon'], template.lon.values)})
-    regridder = xe.Regridder(ncin, dest_grid, 'conservative')
-    ncout = regridder(ncin, keep_attrs=True)
-    return ncout
-
-
-# -------------------------------------------------------------
-
-
 def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
     '''
     Computes the gridpoint pressure on a hybrid pressure coordinate.
@@ -172,6 +147,78 @@ def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
     p.attrs['long_name'] = 'Air pressure'
     return p
 
+
+# -------------------------------------------------------------
+
+
+def conservative_regrid(template, ncin):
+    '''
+    Calls xESMF to perform a conservative horizontal remap.
+
+    Parameters
+    ----------
+    template : xarray DataArray
+        A template dataset defined on the desired destination grid.
+        The specific data and any dimensions other than lat,lon here do not matter.
+    ncin : DataArray
+        Input netcdf file on the original grid.
+
+    Returns
+    -------
+    ncout : xarray DataArray
+        The input data regridded to the template lat,lon grid
+    '''
+    dest_grid = xr.Dataset({'lat':(['lat'], template.lat.values), 
+                            'lon':(['lon'], template.lon.values)})
+    regridder = xe.Regridder(ncin, dest_grid, 'conservative')
+    ncout = regridder(ncin, keep_attrs=True)
+    return ncout
+
+
+# -------------------------------------------------------------
+
+
+def log_interp_to_isobars(data, p, plev):
+    '''
+    Interpolates data with gridded pressures defined on vertical levels to
+    isobars, using logarithmic interpolation. This function is for use when
+    3D pressure is had alongside the data to be interpolated. For the case
+    that 2D surface pressure and hybrid pressure coordinates are had, use
+    interp_sigma_to_presure()
+
+    Parameters
+    ----------
+    data : xarray DataArray
+        The data to interpolate, with vertical dimension 'lev'. Number
+        of additional dimensions, and dimension ordering is irrelevant.
+    p : xarray DataArray
+        The pressure in Pa. Dimensions should match that of 'data'.
+    plev : list or array-like
+        List of isobars to interpolate to, in hPa.
+
+    Returns
+    -------
+    data_interp : xarray DataArray
+        The interpolated data, with new vertical dimension 'plev', specified 
+        in hPa.
+    '''
+    # ------ do interpolation
+    axis    = list(data.dims).index('lev')
+    plev_in = plev.values * metpy.units.units.hPa
+    p_in    = p.values    * metpy.units.units.Pa
+    data_interp = metpy.interpolate.log_interpolate_1d(plev_in, p_in, data, axis=axis).m
+    # ------ create new dims and coords, maintining dimension order of input data
+    plev = xr.DataArray(plev, dims=['plev'], coords={'plev':plev.values}, name='plev', 
+                        attrs={'units':'hPa', 'long_name':'isobaric pressure level'})
+    coords = dict(data.coords)
+    coords = {("plev" if k == "lev" else k): v for k, v in coords.items()}
+    coords['plev'] = plev
+    dims = list(data.dims)
+    dims[dims.index("lev")] = "plev"
+    #------ return a new DataArray
+    data_out = xr.DataArray(data_interp, dims=dims, coords=coords, 
+                            name=data.name, attrs=data.attrs)
+    return data_out
 
 # -------------------------------------------------------------
 
@@ -651,7 +698,6 @@ def interp_to_isentropes(theta, x, isentropes, vdimn='lev', tdimn='time', hdimn=
         for thetap in isentropes:
             np.concatenate([lininterp(theta[i], thetap, x[i]) for i in range(x.shape[hdim])])
    
-
 
 # -------------------------------------------------------------
 
