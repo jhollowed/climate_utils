@@ -142,9 +142,10 @@ def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
     p = hyam * p0 + hybm * ps
     if(dims_like is not None):
         p = p.transpose(*dims_like.dims)
-    p.name = 'P'
+    p = p.rename('pressure')
     p.attrs['units'] = 'Pa'
-    p.attrs['long_name'] = 'Air pressure'
+    p.attrs['long_name'] = 'Air pressure constructed from surface pressure '\
+                           'and hybrid coefficients on midpoint model levels'
     return p
 
 
@@ -198,23 +199,70 @@ def log_interp_to_isobars(data, p, plev):
 
     Returns
     -------
-    data_interp : xarray DataArray
+    xarray DataArray
         The interpolated data, with new vertical dimension 'plev', specified 
         in hPa.
     '''
     # ------ do interpolation
     axis    = list(data.dims).index('lev')
-    plev_in = plev.values * metpy.units.units.hPa
-    p_in    = p.values    * metpy.units.units.Pa
-    data_interp = metpy.interpolate.log_interpolate_1d(plev_in, p_in, data, axis=axis).m
+    plev_in = plev     * metpy.units.units.hPa
+    p_in    = p.values * metpy.units.units.Pa
+    data_interp = metpy.interpolate.log_interpolate_1d(plev_in, p_in, data.values, axis=axis)
     # ------ create new dims and coords, maintining dimension order of input data
-    plev = xr.DataArray(plev, dims=['plev'], coords={'plev':plev.values}, name='plev', 
+    plev = xr.DataArray(plev, dims=['plev'], coords={'plev':plev}, name='plev', 
                         attrs={'units':'hPa', 'long_name':'isobaric pressure level'})
     coords = dict(data.coords)
     coords = {("plev" if k == "lev" else k): v for k, v in coords.items()}
     coords['plev'] = plev
     dims = list(data.dims)
     dims[dims.index("lev")] = "plev"
+    #------ return a new DataArray
+    data_out = xr.DataArray(data_interp, dims=dims, coords=coords, 
+                            name=data.name, attrs=data.attrs)
+    return data_out
+
+
+# -------------------------------------------------------------
+
+
+def linear_interp_to_isentropes(data, theta, theta_levels):
+    '''
+    Interpolates data with gridded potential temperature defined on vertical 
+    levels to isentropes, using linear interpolation. 
+
+    Parameters
+    ----------
+    data : xarray DataArray
+        The data to interpolate, with vertical dimension 'lev'. Number
+        of additional dimensions, and dimension ordering is irrelevant.
+    theta : xarray DataArray
+        The potential temperature in K. Dimensions should match that of 'data'.
+    theta_levels : list or array-like
+        List of isentropes to interpolate to, in K.
+
+    Returns
+    -------
+    xarray DataArray
+        The interpolated data, with new vertical dimension 'isentrope', specified 
+        in K.
+    '''
+
+    # ------ check dims
+    theta = theta.transpose(*data.dims)
+    theta_levels = np.asarray(theta_levels)
+
+    # ------ do interpolation
+    axis = data.get_axis_num('lev')
+    data_interp = metpy.interpolate.interpolate_1d(theta_levels, theta, data, axis=axis)
+    # ------ create new dims and coords, maintining dimension order of input data
+    isentropes = xr.DataArray(theta_levels, dims=['isentrope'], 
+                              coords={'isentrope':theta_levels}, name='isentrope', 
+                              attrs={'units':'K', 'long_name':'surface of potential temperature'})
+    coords = dict(data.coords)
+    coords = {("isentrope" if k == "lev" else k): v for k, v in coords.items()}
+    coords['isentrope'] = isentropes
+    dims = list(data.dims)
+    dims[dims.index("lev")] = "isentrope"
     #------ return a new DataArray
     data_out = xr.DataArray(data_interp, dims=dims, coords=coords, 
                             name=data.name, attrs=data.attrs)
@@ -666,38 +714,7 @@ def unstructured_zonalmean_remap_matrix(lat, L, lat_out = None):
         pdb.set_trace()
         return [ZM_nat, ZM]
     return ZM_nat
-
-
-# -------------------------------------------------------------
-
-
-def interp_to_isentropes(theta, x, isentropes, vdimn='lev', tdimn='time', hdimn='ncol'):
-    '''
-    Interpolates a variable x to isentropes
-    TODO: currently assumes unstructured horizontal data
-    
-    Parameters
-    ----------
-    theta : xarray DataArray
-        potential temperature
-    x : xarray DataArray
-        variable to interpolate
-    isentropes : float list
-        list of isentrope levels to interpolate to
-    
-    Returns
-    -------
-    The interpolated varibale x at the isentrope levels 
-    '''
-    vdim = x.dims.index(vdimn)
-    tdim = x.dims.index(tdimn)
-    hdim = x.dims.index(hdimn)
-
-    for j in range(x.shape[tdim]):
-        print('----- {}'.format(j), end='\r')
-        for thetap in isentropes:
-            np.concatenate([lininterp(theta[i], thetap, x[i]) for i in range(x.shape[hdim])])
-   
+ 
 
 # -------------------------------------------------------------
 
