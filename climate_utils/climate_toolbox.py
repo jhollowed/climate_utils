@@ -268,6 +268,31 @@ def linear_interp_to_isentropes(data, theta, theta_levels):
                             name=data.name, attrs=data.attrs)
     return data_out
 
+
+# -------------------------------------------------------------
+
+
+def meridional_weighted_mean(X, weight_only=False):
+    '''
+    Computes a cos(lat) weighted meridional mean.
+    
+    Parameters
+    ----------
+    X : xarray DataArray
+        N-dimensional data to average. One dimension must be 'lat'
+    weight_only : bool, optional
+        Wether or not to weight the data without averaging
+    '''
+    
+    lat_weights = np.cos(np.deg2rad(X.lat))
+    lat_weights.name = 'weights'
+    X_weighted = X.weighted(lat_weights)
+    if(weight_only):
+        return X_weighted
+    else:
+        return X_weighted.mean('lat')
+
+
 # -------------------------------------------------------------
 
 
@@ -363,9 +388,7 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000,
     if(len(horz_dims) > 0 and not vertical_only):
         if('lat' in horz_dims):
             # data has lat; weight
-            lat_weights = np.cos(np.deg2rad(X.lat))
-            lat_weights.name = "weights"
-            X_weighted = X_stat.weighted(lat_weights)
+            X_weighted = meridional_weighted_mean(X_stat, weight_only=True)
         else:
             # data has only lon; no weighting
             X_weighted = X_stat
