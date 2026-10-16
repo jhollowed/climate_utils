@@ -8,11 +8,15 @@ See docstrings at function definitions for arguments and usage
 1. Configure Conda environment for access to needed dependencies
 
    ```bash
-   conda create -n climo-env -c conda-forge python=3.11 xesmf esmpy esmf netcdf4 metpy matplotlib
+   conda create -n climo-env -c conda-forge python=3.11 xesmf esmpy esmf netcdf4 metpy matplotlib numpy xarray
    conda activate climo_env
    ```
 
 2. Clone the package
+
+    ```
+    git clone git@github.com:jhollowed/climate_utils.git
+    ```
 
 3. Locally install the package
 
@@ -27,8 +31,8 @@ See docstrings at function definitions for arguments and usage
 
 Import the functions as e.g.
 
-```python
-import climate_utils.climate_toolbox as ctb
-import climate_utils.climate_artist as cart
-import climate_utils.artist_utils as aut
-```
+    ```python
+    import climate_utils.climate_toolbox as ctb
+    import climate_utils.climate_artist as cart
+    import climate_utils.artist_utils as aut
+    ```

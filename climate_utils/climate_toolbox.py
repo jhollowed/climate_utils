@@ -24,10 +24,26 @@ from numpy.core.multiarray import interp as lininterp
 
 # ===============================================================
 
+
 def check_data_inputs(data):
+    '''
+    Checks that the input data is a xarray Dataset, DataArray, or a string giving the file
+    location of a file which can be opened with xarray. If so, then the file is opened and 
+    returned.
+
+    Parameters
+    ----------
+    data : xarray Dataset, DataArray, string, or NumPy string
+        The input object.
+
+    Returns
+    -------
+    xarray Dataset or DataArray
+        The input data, or the data contained in the file pointed to by the input string.
+    '''
     acceptable_types = [xr.core.dataset.Dataset, xr.core.dataarray.DataArray, str, np.str_]
     if(type(data) not in acceptable_types):
-        raise RuntimeError('data must be provided as an xarray Dataset,'\
+        raise ValueError('data must be provided as an xarray Dataset,'\
                            'DataArray, or a string to the file')
     if(type(data) == str or type(data) == np.str_):
         data = xr.open_dataset(data)
@@ -35,6 +51,37 @@ def check_data_inputs(data):
 
 
 # -------------------------------------------------------------
+
+
+def compare_dims_and_coords(x, y):
+    '''
+    Checks that two DataArrays have identical dimensions and coordinates, regardless
+    of ordering. This does not check auxillary coordinates.
+
+    Parameters
+    ----------
+    x : xarray DataArray
+        The first array to compare.
+    y : xarray DataArray
+        The second array to compare.
+
+    Returns
+    -------
+    bool
+        Whether or not the comparison passes.
+    '''
+
+    if set(x.dims) != set(y.dims): return False
+
+    for d in x.dims:
+        if (x.sizes[d] != y.sizes[d]):           return False
+        if((d in x.coords) != (d in y.coords)):  return False
+        if(d in x.coords and 
+           not x.coords[d].equals(y.coords[d])): return False
+    return True
+
+# -------------------------------------------------------------
+
 
 
 def time2day(time):
@@ -48,7 +95,8 @@ def time2day(time):
 
     Returns
     -------
-    Number of days since time 0, for all times in the input
+    int
+        Number of days since time 0, for all times in the input
     '''
     if(type(time) == xr.core.dataarray.DataArray):
         time = np.array(time)
@@ -74,7 +122,7 @@ def ptoz(p, T0=250, P0=1000):
 
     Returns
     -------
-    z : float or flaot array
+    float or flaot array
         the geopotential height in m
     '''
     try: _ = p.m
@@ -100,7 +148,7 @@ def ztop(z):
 
     Returns
     -------
-    p : float or float array
+    float or float array
         pressure in hPa
     '''
     try: _ = z.m
@@ -111,42 +159,419 @@ def ztop(z):
     return P0 * np.exp(-z/H)
 
 
+# -------------------------------------------------------------------------
+
+
+def level_interfaces_to_midpoints(x, idim='ilev'):
+    '''
+    Moves a variable x from vertical interface levels to midpoint levels.
+    Assumes that the input data is defined on a vertical dimension idim.
+    Output is the linear average of each adjacent pair of values, starting
+    from the surface, on a new dimension called "lev".
+
+    Parameters
+    ----------
+    x : xarray DataArray
+        The input data, with at least one dimension idim of length N. It is 
+        assumed that the positive direction of this dimension is upward in 
+        the vertical.
+    idim : str, optional
+        The interface level dimension name. Default is "ilev".
+
+    Returns
+    -------
+    xarray DataArray
+        The data on midpoints levels, with vertical dimension name "lev", and
+        of length N-1.
+    '''
+    x = (x + x.shift({idim:-1})) / 2
+    x = x.isel({idim:slice(0, -1)})
+    x = x.rename({idim:'lev'})
+    return x
+
+
 # -------------------------------------------------------------
 
 
-def compute_hybrid_pressure(ps, hyam, hybm, dims_like=None, p0=100000):
+def compute_hybrid_pressure(ps, A, B, p0=100000, 
+                            move_to_midpoints=False, new_dim=None, new_coord=None, dims_like=None):
     '''
-    Computes the gridpoint pressure on a hybrid pressure coordinate.
+    Computes gridpoint pressure on a hybrid pressure coordinate from surface pressure, with
+    the convention P = A*P0 + B*PS.
     
     Parameters
     ----------
     ps : xarray DataArray
         surface pressure in Pa
-    hyam : xarray DataArray
-        1-D hybrid A coefficients on the model levels
-    hybm : xarray DataArray
-        1-D hybrid B coefficients on the model levels
-    dims_like : xarray DataArray, optional
-        pressure data will be transposed such that it's 
-        order of dimensions (and thus shape) matches this
-        template DataArray. Defaults to None, in which case
-        no transpose is performed.
+    A : xarray DataArray
+        1-D dimensionless hybrid A coefficients. 
+        If dim is 'lev', then A and B are assumed to be defined at level midpoints (model levels). 
+        If dim is 'ilev', then A and B is assumed top be defined at the level interfaces, 
+        in which case the gridded pressure will be returned on midpoint levels defined as the
+        average of the surrounding interfaces.
+    B : xarray DataArray
+        1-D dimensionless hybrid B coefficients. Vertical dim must match A.
     p0 : float, optional
         reference pressure in Pa. Defaults to 100000 Pa.
+    move_to_midpoints : bool, optional
+        Whether or not to move the resulting pressure field to midpoint levels with dim "lev", 
+        in the case that A,B were provided on interface levels. Default is False, in which case 
+        the pressure is returned on the native A,B levels. If A,B are already provided on midpoint
+        levels (their dimension is "lev"), then setting this arg to True will print a warning.
+    new_dim : str, optional
+        A new vertical dimension name for the output pressures.
+        Defaults to None, in which case the name is inherited from A,B ("ilev" or "lev"), or 
+        set to "lev" if move_to_midpoints is True.
+    new_coord : array-like, optional
+        A set of N-1 coordaintes to attach to the vertical dimension new_dim. Defaults to None, 
+        in which case the vertical coordinate is inherited from A,B. If A,B have no coordinate
+        data, then neither will the output pressures. If supplied, then new_dim must also be
+        supplied.
+    dims_like : xarray DataArray, optional
+        Pressure data will be transposed such that it's  order of dimensions (and thus 
+        shape) matches this template DataArray. Defaults to None, in which case no 
+        transpose is performed. If supplied, then the dimensions and coordinates of
+        the computed pressure thickness must match that of dims_like AFTER applying
+        new_dim and new_coord.
         
     Returns
     -------
-    p : xarray DataArray
+    xarray DataArray
         pressure field, with variable name 'P'
     '''
-    p = hyam * p0 + hybm * ps
+    
+    # check A,B inputs
+    if(len(A.dims)!=1 or len(B.dims)!=1):
+        raise ValueError('A and B must be one-dimensional')
+    if(not compare_dims_and_coords(A, B)):
+        raise ValueError(f'dimensions or coordinates of A and B don\'t match!')
+    if(A.dims[0] not in ['ilev', 'lev']):
+        raise ValueError(f'dimension of A,B must be \'ilev\' or \'lev\', not {A.dims[0]}')
+
+    native_dim = A.dims[0]
+    N          = A.sizes[native_dim]
+    
+    # check new_dim and new_coord inputs
+    if((new_dim is None) and (new_coord is not None)):
+        raise ValueError('new_dim must be passed if new_coord is passed')
+    if(new_coord is not None):
+        if(native_dim == 'lev' or (native_dim == 'ilev' and not move_to_midpoints)):
+            if(len(new_coord) != N): 
+                raise ValueError(f'length of new_coord must be len(A,B)={N}, not {len(new_coord)}')
+        elif(native_dim == 'ilev' and move_to_midpoints):
+            if(len(new_coord) != N-1): 
+                raise ValueError(f'move_to_midpoints is True; length of new_coord must be N-1={N-1}, not {len(new_coord)}')
+            if(N<2):
+                raise ValueError('input coefficients require at least two levels when move_to_midpoints is True!')
+
+
+    # find pressure in the case that A,B were provided on interface levels
+    if(native_dim == 'ilev'):
+        p = A * p0 + B * ps
+        p.attrs['long_name'] = 'Air pressure constructed from surface pressure '\
+                               'and hybrid coefficients on interface model levels'
+        if(move_to_midpoints):
+            p = level_interfaces_to_midpoints(p)
+            native_dim = 'lev'
+            p.attrs['long_name'] = 'Air pressure constructed from surface pressure '\
+                                   'and hybrid coefficients on midpoint model levels '\
+                                   '(average of surrounding interface levels)'
+    
+    # find pressure in the case that A,B were provided on model levels
+    elif(native_dim == 'lev'):
+        p = A * p0 + B * ps
+        p.attrs['long_name'] = 'Air pressure constructed from surface pressure '\
+                               'and hybrid coefficients on midpoint model levels'
+        if(move_to_midpoints):
+            warnings.warn('move_to_midpoints was set to True, but A,B were already provided '\
+                          'on midpoint levels (dim="lev")')
+    
+    # rename dimension and apply coordinates
+    if(new_dim is not None):
+        p = p.rename({native_dim:new_dim})
+        if(new_coord is not None):
+            p = p.assign_coords({new_dim:new_coord})
+   
+    # transpose according to dims_like template
     if(dims_like is not None):
+        if not compare_dims_and_coords(p, dims_like):
+            raise RuntimeError('dims and coords of computed pressure and dims_like do not match!')
         p = p.transpose(*dims_like.dims)
+   
+    # finish
     p = p.rename('pressure')
     p.attrs['units'] = 'Pa'
-    p.attrs['long_name'] = 'Air pressure constructed from surface pressure '\
-                           'and hybrid coefficients on midpoint model levels'
     return p
+
+
+# -------------------------------------------------------------
+
+
+def compute_hybrid_pressure_thickness(ps, hyai, hybi, p0=100000,
+                                      new_dim=None, new_coord=None, dims_like=None):
+    '''
+    Computes pressure thickness on a hybrid pressure coordinate from surface pressure, with
+    the convention P = A*P0 + B*PS.
+ 
+    Parameters
+    ----------
+    ps : xarray DataArray
+        Surface pressure in Pa.
+    hyai : xarray DataArray
+        1-D dimensionless hybrid A coefficients with dimension "ilev" of length N. 
+        It is assumed that pressure decreases (height increases) in the positive ilev direction.
+    hybi : xarray DataArray
+        1-D hybrid dimensionless B coefficients with dimension "ilev" of length N. 
+        It is assumed that pressure decreases (height increases) in the positive ilev direction.
+    p0 : float, optional
+        reference pressure in Pa. Defaults to 100000 Pa.
+    new_dim : str, optional
+        A new vertical dimension name for the output set of pressure thicknesses.
+        Defaults to None, in which case the thicknesses are given on the dimension
+        "ilev".
+    new_coord : array-like, optional
+        A set of N-1 coordaintes values to attach to the vertical dimension new_dim.
+        Defaults to None, in which case the vertical coordinate will be the first
+        N-1 values of the "ilev" coordinate of the input data. If supplied, then
+        new_dim must also be supplied.
+    dims_like : xarray DataArray, optional
+        Pressure data will be transposed such that it's  order of dimensions (and thus 
+        shape) matches this template DataArray. Defaults to None, in which case no 
+        transpose is performed. If supplied, then the dimensions and coordinates of
+        the computed pressure thickness must match that of dims_like AFTER applying
+        new_dim and new_coord.
+        
+    Returns
+    -------
+    xarray DataArray
+        pressure-thickness field in Pa, with variable name 'pdel' and 
+        vertical dimension "ilev" of length N-1, unless renamed via new_dim.
+    '''
+     
+    # check A,B inputs
+    if(len(hyai.dims)!=1 or len(hybi.dims)!=1):
+        raise ValueError('A and B must be one-dimensional')
+    if(not compare_dims_and_coords(hyai, hybi)):
+        raise ValueError(f'dimensions or coordinates of hyai and hybi don\'t match!')
+    if(hyai.dims[0] != 'ilev'):
+        raise ValueError(f'dimension of hyai,hybi must be \'ilev\', not {hyai.dims[0]}')
+
+    N = hyai.sizes['ilev']
+    if(N<2):
+        raise ValueError('input coefficients require at least two levels to compute thickness!')
+
+    # check new_dim and new_coord inputs
+    if((new_dim is None) and (new_coord is not None)):
+        raise ValueError('new_dim must be passed if new_coord is passed')
+    if(new_coord is not None):
+        if(len(new_coord) != N-1):
+            raise ValueError(f'length of new_coord must be N-1=({N-1}), not {len(new_coord)}')
+ 
+    # compute the pressure thickness
+    pi   = (hyai * p0 + hybi * ps)           # get pressure at interface levels
+    pdel = (pi - pi.shift({'ilev':-1}))    # take pressure difference
+    pdel = pdel.isel(ilev=slice(None, -1)) # remove NaN from the model top
+    
+    # rename dimension and apply coordinates
+    if(new_dim is not None):
+        pdel = pdel.rename({'ilev':new_dim})
+        if(new_coord is not None):
+            pdel = pdel.assign_coords({new_dim:new_coord})
+   
+    # transpose according to dims_like template
+    if(dims_like is not None):
+        if not compare_dims_and_coords(pdel, dims_like):
+            raise RuntimeError('dims and coords of computed pressure thickness and dims_like do not match!')
+        pdel = pdel.transpose(*dims_like.dims)
+
+    # finish
+    pdel.name = 'pdel'
+    return pdel
+
+
+# -------------------------------------------------------------
+
+
+def compute_pressure_thickness(p, new_dim=None, new_coord=None):
+    '''
+    Computes pressure thickness from 3D pressure data on interface levels.
+    This function is written explicitly for interface levels with vertical
+    dimension "ilev"; it does not compute interface levels from midpoint
+    by interpolation and/or extrapolation. For obtaining pressure thicknesses
+    from midpoint level pressure data, first convert to interface levels
+    by any preferred method.
+
+    Parameters
+    ----------
+    p : xarray DataArray
+        The atmospheric pressure, in Pa, of length-N in the vertical dimension. 
+        The vertical dimension must be named "ilev". It is assumed that pressure
+        decreases (height increases) in the positive ilev direction.
+    new_dim : str, optional
+        A new vertical dimension name for the output set of pressure thicknesses.
+        Defaults to None, in which case the thicknesses are given on the dimension
+        "ilev".
+    new_coord : array-like, optional
+        A set of N-1 coordainte values to attach to the vertical dimension new_dim.
+        Defaults to None, in which case the vertical coordinate will be the first
+        N-1 values of the "ilev" coordinate of the input data. If supplied, then
+        new_dim must also be supplied.
+
+    Returns
+    -------
+    xarray DataArray
+        The pressure thickness in Pa, with dimensions matching that of p, except 
+        that the vertical dimension "ilev" is reduced from a length of N to N-1,
+        and optionally renamed according to new_dim.
+        Each data value gives to the width of the layer above the corresponding 
+        interface. That is, the thickness for vertical index Y is the thickness 
+        between vertical index Y and Y+1.
+    '''
+
+    # check pressure input
+    if('ilev' not in p.dims):
+        raise ValueError('input pressure must have vertical dimension "ilev"')
+    
+    N = p.sizes['ilev']
+    if(N<2):
+        raise ValueError('input pressure requires at least two levels to compute thickness!')
+
+    # check new_dim and new_coord inputs
+    if((new_dim is None) and (new_coord is not None)):
+        raise ValueError('new_dim must be passed if new_coord is passed')
+    if(new_coord is not None):
+        if(len(new_coord) != N-1):
+            raise ValueError(f'new_coord must have length N-1, not {len(new_coord)}')
+   
+    # compute pressure thickness
+    pdel = (p - p.shift({'ilev':-1}))
+    pdel = pdel.isel({'ilev':slice(0, -1)})
+
+    # rename vertical dimsension
+    if(new_dim is not None):
+        pdel = pdel.rename({'ilev':new_dim})
+        if(new_coord is not None):
+            pdel = pdel.assign_coords({new_dim:new_coord})
+
+    return pdel
+
+
+# -------------------------------------------------------------
+
+
+def pressure_weighted_column_mean(X, p=None, ps=None, hyai=None, hybi=None, 
+                                  weight_only=False):
+    '''
+    Computes a pressure-thickness weighted vertical mean of a variable X.
+    This is done either given the atmospheric pressure on interface levels, 
+    or the surface pressure and hybrid coefficients on interface levels. In
+    either case, the interface levels must be those that correspond to the
+    midpoint levels of X.
+    
+    Parameters
+    ----------
+    X : xarray DataArray
+        N-dimensional data to average. One dimension must be 'lev'
+    p : xarray DataArray
+        Atmospheric pressure in Pa. One dimension must be 'ilev', 
+        and the other dimensions must match that of X.
+        Must be provided if ps=None.
+    ps : xarray DataArray, optional
+        Surface pressure in Pa. All dimensions must match those of X, excluding
+        'lev'. Must be provided if p=None.
+    hyai : xarray DataArray
+        1-D hybrid A coefficients on the interface levels with dimension 'ilev'.
+        Must be provided if p=None.
+    hybi : xarray DataArray
+        1-D hybrid B coefficients on the interface levels with dimension 'ilev'.
+        Must be provided if p=None.
+        
+    weight_only : bool, optional
+        Whether or not to weight the data without averaging
+    '''
+   
+    # check inputs
+    if('lev' not in X.dims):
+        raise ValueError('X must have a dimension "lev"')
+
+    # grab quantities for validation
+    X_horz = X.isel(lev=0, drop=True)
+    XN     = X.sizes['lev']
+
+    # check hybrid coefficients and surface pressure inputs
+    if(p is None):
+        if(ps is None or hyai is None or hybi is None):
+            raise ValueError('When p is not provided, ps, hyai, and hybi are required')
+        if(not compare_dims_and_coords(X_horz, ps)):
+            raise ValueError(f'After excluding the vertical dim lev, the dims of X '\
+                             f'({X_horz.dims}) and ps ({ps.dims}) must match!')
+        if('ilev' not in hyai.dims or 'ilev' not in hybi.dims):
+            raise ValueError('hyai and hybi must have dimension "ilev"')
+        AN, BN = hyai.sizes['ilev'], hybi.sizes['ilev']
+        if(AN != XN+1 or BN != XN+1):
+            raise ValueError(f'size of X in dimension "lev" is {XN}, so size of hyai and hybi in '\
+                             f'dimension "ilev" should be {XN+1}, not A={AN} and B={BN}')
+    # check 3D pressure input
+    if(p is not None):
+        if(ps is not None or hyai is not None or hybi is not None):
+            raise ValueError('When p is provided, ps, hyai, and hybi should not be passed')
+        if('ilev' not in p.dims):
+            raise ValueError('p must have a dimension "ilev"')
+        pN = p.sizes['ilev']
+        p_horz = p.isel(ilev=0, drop=True)
+        if(not compare_dims_and_coords(X_horz, p_horz)):
+            raise ValueError(f'After excluding the vertical lev and ilev, the dims of X '\
+                             f'({X_horz.dims}) and p ({p_horz.dims}) must match!')
+        if(pN != XN+1):
+            raise ValueError(f'size of X in dimension "lev" is {XN}, so size of p in dimension '\
+                             f'"ilev" should be {XN+1}, not {pN}')
+    
+    # check if X has a vertical coordinate attached to the vertical dimension
+    if('lev' in X.coords): new_coord = X['lev']
+    else:                  new_coord = None
+    
+    # compute pressure thickness either using surface or 3D pressure
+    if(ps is not None):
+        pdel = compute_hybrid_pressure_thickness(ps, hyai, hybi, dims_like=X, 
+                                                 new_dim='lev', new_coord=new_coord)
+    else:
+        pdel = compute_pressure_thickness(p, new_dim='lev', new_coord=new_coord)
+
+    # check that result matches X in structure
+    if(not compare_dims_and_coords(X, pdel)):
+        raise ValueError(f'dims or coords of X and computed pressure thicknesses don\'t match!') 
+
+    # weight, average, return
+    pdel.name = "weights"
+    X_weighted = X.weighted(pdel)
+    if(weight_only):
+        return X_weighted
+    else:
+        return X_weighted.mean('lev')
+
+
+# -------------------------------------------------------------
+
+
+def meridional_weighted_mean(X, weight_only=False):
+    '''
+    Computes a cos(lat) weighted meridional mean.
+    
+    Parameters
+    ----------
+    X : xarray DataArray
+        N-dimensional data to average. One dimension must be 'lat'
+    weight_only : bool, optional
+        Wether or not to weight the data without averaging
+    '''
+    
+    lat_weights = np.cos(np.deg2rad(X.lat))
+    lat_weights.name = 'weights'
+    X_weighted = X.weighted(lat_weights)
+    if(weight_only):
+        return X_weighted
+    else:
+        return X_weighted.mean('lat')
 
 
 # -------------------------------------------------------------
@@ -263,34 +688,10 @@ def linear_interp_to_isentropes(data, theta, theta_levels):
     coords['isentrope'] = isentropes
     dims = list(data.dims)
     dims[dims.index("lev")] = "isentrope"
-    #------ return a new DataArray
+    # ------ return a new DataArray
     data_out = xr.DataArray(data_interp, dims=dims, coords=coords, 
                             name=data.name, attrs=data.attrs)
     return data_out
-
-
-# -------------------------------------------------------------
-
-
-def meridional_weighted_mean(X, weight_only=False):
-    '''
-    Computes a cos(lat) weighted meridional mean.
-    
-    Parameters
-    ----------
-    X : xarray DataArray
-        N-dimensional data to average. One dimension must be 'lat'
-    weight_only : bool, optional
-        Wether or not to weight the data without averaging
-    '''
-    
-    lat_weights = np.cos(np.deg2rad(X.lat))
-    lat_weights.name = 'weights'
-    X_weighted = X.weighted(lat_weights)
-    if(weight_only):
-        return X_weighted
-    else:
-        return X_weighted.mean('lat')
 
 
 # -------------------------------------------------------------
@@ -349,7 +750,7 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000,
     # check that target function is valid
     available_stats=['sum', 'mean']
     if(stat not in available_stats):
-        raise RuntimeError('argument \'stat\' invalid. Options are: {}'\
+        raise ValueError('argument \'stat\' invalid. Options are: {}'\
                            .format(available_stats))
     # lambda function to return function handle of statistic estimator
     stat_func = lambda X, d: X.sum(dim=d) if stat=='sum' else X.mean(dim=d)
@@ -362,10 +763,10 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000,
    
     # enforce use cases
     if(len(horz_dims) == 0 and len(vert_dims) == 0): 
-        raise RuntimeError('input data does not contain dimensions '\
+        raise ValueError('input data does not contain dimensions '\
                            '\'lat\', \'lon\', or \'lev\'')
     if(len(vert_dims) != 0 and (ps is None or hyai is None or hybi is None)):
-        raise RuntimeError('arguments \'ps\', \'hayi\', and \'hybi\' must be '\
+        raise ValueError('arguments \'ps\', \'hayi\', and \'hybi\' must be '\
                            'included when input data contains dimension \'lev\'')
     
     # make this assignment in case vertical weighting is skipped
@@ -377,10 +778,7 @@ def latlon_weighted_stat(X, stat, ps=None, hyai=None, hybi=None, p0=100000,
     # ---- if data has vertical dimension, weight in lev, apply stat in lev
     if(len(vert_dims) > 0 and not horizontal_only):
         # data has lev; weight
-        lev_weights = compute_hybrid_pressure_thickness(ps, hyai, hybi, 
-                                                        dims_like=X_stat)
-        lev_weights.name = "weights"
-        X_weighted = X_stat.weighted(lev_weights)
+        X_weighted = pressure_weighted_mean(X_stat, weight_only=True)
         X_stat = stat_func(X_weighted, vert_dims)
     
     # ---- if data has horizontal dimensions, weight in latitude, 
@@ -451,7 +849,7 @@ def native_weighted_stat(X, stat, horz_weights=None,
     # check that target function is valid
     available_stats=['sum', 'mean']
     if(stat not in available_stats):
-        raise RuntimeError('argument \'stat\' invalid. Options are: {}'\
+        raise ValueError('argument \'stat\' invalid. Options are: {}'\
                            .format(available_stats))
     # lambda function to return function handle of statistic estimator
     stat_func = lambda X, d: X.sum(dim=d) if stat=='sum' else X.mean(dim=d)
@@ -464,12 +862,12 @@ def native_weighted_stat(X, stat, horz_weights=None,
     
     # enforce use cases
     if(len(horz_dims) == 0 and len(vert_dims) == 0): 
-        raise RuntimeError('input data does not contain dimensions \'ncol\' or \'lev\'')
+        raise ValueError('input data does not contain dimensions \'ncol\' or \'lev\'')
     if(len(horz_dims) != 0 and (horz_weights is None)):
-        raise RuntimeError('argument \'horz_weights\' must be '\
+        raise ValueError('argument \'horz_weights\' must be '\
                            'included when input data contains dimension \'ncol\'')
     if(len(vert_dims) != 0 and (ps is None or hyai is None or hybi is None)):
-        raise RuntimeError('arguments \'ps\', \'hayi\', and \'hybi\' must be '\
+        raise ValueError('arguments \'ps\', \'hayi\', and \'hybi\' must be '\
                            'included when input data contains dimension \'lev\'')
     
     # make this assignment in case vertical weighting is skipped
@@ -528,67 +926,6 @@ def native_weighted_mean(X, horz_weights=None,
     
     
 # -------------------------------------------------------------
-
-
-def compute_hybrid_pressure_thickness(ps, hyai, hybi, 
-                                      dims_like=None, lev=None, p0=100000):
-    '''
-    Computes the gridpoint pressure thickness on a hybrid pressure coordinate.
-    It is expected that the interface level and model level coordinate names 
-    are 'ilev' and 'lev'. Any other dimensions may be present in any order.
-    
-    Parameters
-    ----------
-    ps : xarray DataArray
-        2- or 3-D (including time) surface pressure
-    hyai : xarray DataArray
-        1-D hybrid A coefficients on the interface levels
-    hybi : xarray DataArray
-        1-D hybrid B coefficients on the interface levels 
-    dims_like : xarray DataArray, optional
-        pressure data will be transposed such that it's 
-        order of dimensions (and thus shape) matches this
-        template DataArray. Defaults to None, in which case
-        no transpose is performed.
-    lev : xarray DataArray, optional
-        1-D model pressur levels. The pressure widths found between
-        each interface level pair will be assigned to these model 
-        levels. This is optionally inherited from dims_like, if 
-        dims_like was provided. If dims_like was not provided, this
-        argument is required.
-    p0 : float, optional
-        reference pressure in Pa. Defaults to 100000 Pa.
-        
-    Returns
-    -------
-    dp : xarray DataArray
-        3- or 4-D pressure-thickness field, with variable name 'pdel'
-    '''
-    
-    if(dims_like is None and lev is None):
-        raise RuntimeError('At least one of the following arguments must be '\
-                           'specified: [dims_like, lev]')
-    if(dims_like is not None and lev is not None):
-        raise RuntimeError('Only one of the following arguments may be '\
-                           'specified: [dims_like, lev]')
-    if(dims_like is not None): 
-        lev = dims_like.lev
-        
-    pi = (hyai * p0 + hybi * ps) # get pressure at interface levels
-    pdel = pi.diff('ilev')       # take pressure difference
-    pdel = pdel / 100            # scale to hPa
-    
-    # replace ilev coordiante with lev
-    pdel['ilev'] = lev.values
-    pdel = pdel.rename({'ilev':'lev'})
-    
-    if(dims_like is not None):
-        pdel = pdel.transpose(*dims_like.dims)
-    pdel.name = 'pdel'
-    return pdel
-
-
-# -------------------------------------------------------------
   
     
 def compute_theta(T, ps, hyai, hybi, pref=100000):
@@ -615,7 +952,7 @@ def compute_theta(T, ps, hyai, hybi, pref=100000):
         the potential temperature
     '''
     
-    p = compute_hybrid_pressure(ps, hyai, hybi, dims_like = T)
+    p = compute_hybrid_pressure(ps, hyai, hybi, dims_like=T)
     theta = T * (pref/p)**(const.kappa)
     theta.name = 'THETA'
     return theta
@@ -987,13 +1324,13 @@ def lp_norm(q, qT, p, weighted=True, horz_weights=None,
     
     # enforce use cases
     if((len(horz_dims) == 0 or len(horz_dims) >= 3) and len(vert_dims) != 1):
-        raise RuntimeError('expected horizontal dimensions (\'lat\', \'lon\') '\
+        raise ValueError('expected horizontal dimensions (\'lat\', \'lon\') '\
                            'or (\'ncol\') and/or vertical dimension (\'lev\')')
     if('ncol' in horz_dims and (horz_weights is None)):
-        raise RuntimeError('argument \'horz_weights\' must be '\
+        raise ValueError('argument \'horz_weights\' must be '\
                            'included when input data contains dimension \'ncol\'')
     if(len(vert_dims) > 0 and (ps is None or hyai is None or hybi is None)):
-        raise RuntimeError('arguments \'ps\', \'hayi\', and \'hybi\' must be '\
+        raise ValueError('arguments \'ps\', \'hayi\', and \'hybi\' must be '\
                            'included when input data contains dimension \'lev\'')
         
     # use either unstructured or lat-lon weighting routines
