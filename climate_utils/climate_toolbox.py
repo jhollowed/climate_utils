@@ -249,7 +249,7 @@ def compute_hybrid_pressure(ps, A, B, p0=100000,
         raise ValueError(f'dimension of A,B must be \'ilev\' or \'lev\', not {A.dims[0]}')
 
     native_dim = A.dims[0]
-    N          = A.sizes[native_dim]
+    N = A.sizes[native_dim]
     
     # check new_dim and new_coord inputs
     if((new_dim is None) and (new_coord is not None)):
@@ -260,7 +260,8 @@ def compute_hybrid_pressure(ps, A, B, p0=100000,
                 raise ValueError(f'length of new_coord must be len(A,B)={N}, not {len(new_coord)}')
         elif(native_dim == 'ilev' and move_to_midpoints):
             if(len(new_coord) != N-1): 
-                raise ValueError(f'move_to_midpoints is True; length of new_coord must be N-1={N-1}, not {len(new_coord)}')
+                raise ValueError(f'move_to_midpoints is True; length of new_coord must be N-1={N-1}, '\
+                                 f'not {len(new_coord)}')
             if(N<2):
                 raise ValueError('input coefficients require at least two levels when move_to_midpoints is True!')
 
@@ -577,33 +578,6 @@ def meridional_weighted_mean(X, weight_only=False):
 # -------------------------------------------------------------
 
 
-def conservative_regrid(template, ncin):
-    '''
-    Calls xESMF to perform a conservative horizontal remap.
-
-    Parameters
-    ----------
-    template : xarray DataArray
-        A template dataset defined on the desired destination grid.
-        The specific data and any dimensions other than lat,lon here do not matter.
-    ncin : DataArray
-        Input netcdf file on the original grid.
-
-    Returns
-    -------
-    ncout : xarray DataArray
-        The input data regridded to the template lat,lon grid
-    '''
-    dest_grid = xr.Dataset({'lat':(['lat'], template.lat.values), 
-                            'lon':(['lon'], template.lon.values)})
-    regridder = xe.Regridder(ncin, dest_grid, 'conservative')
-    ncout = regridder(ncin, keep_attrs=True)
-    return ncout
-
-
-# -------------------------------------------------------------
-
-
 def log_interp_to_isobars(data, p, plev):
     '''
     Interpolates data with gridded pressures defined on vertical levels to
@@ -692,6 +666,129 @@ def linear_interp_to_isentropes(data, theta, theta_levels):
     data_out = xr.DataArray(data_interp, dims=dims, coords=coords, 
                             name=data.name, attrs=data.attrs)
     return data_out
+
+
+# -------------------------------------------------------------
+
+
+def conservative_regrid(template, ncin):
+    '''
+    Calls xESMF to perform a conservative horizontal remap.
+
+    Parameters
+    ----------
+    template : xarray DataArray
+        A template dataset defined on the desired destination grid.
+        The specific data and any dimensions other than lat,lon here do not matter.
+    ncin : DataArray
+        Input netcdf file on the original grid.
+
+    Returns
+    -------
+    ncout : xarray DataArray
+        The input data regridded to the template lat,lon grid
+    '''
+    dest_grid = xr.Dataset({'lat':(['lat'], template.lat.values), 
+                            'lon':(['lon'], template.lon.values)})
+    regridder = xe.Regridder(ncin, dest_grid, 'conservative')
+    ncout = regridder(ncin, keep_attrs=True)
+    return ncout
+
+
+# -------------------------------------------------------------
+
+
+def align_datasets(x, xv, y, yv, v, vertical='pressure'):
+    '''
+    Aligns the data x to the grid of data y by interpolating in the horizontal, then
+    interpolates both datasets onto a common set of vertical levels.
+    In the horizontal, a conservative regrid from the xESMF package is used.
+    In the vertical, a 1D interpolation from MetPy is used to remap both
+    datasets from the input levels to constant surfaces of a reference variable.
+    For the case that the vertical coordinate is 'pressure', then a logarithmic
+    interpolation is used.
+    For the case that the vertical coordinate is 'theta' (potential temperature),
+    then a linear interpolation is used. That is, it is assumed that the quantities
+    x and y vary approximately linearly across isentropes. If this assumption does
+    not hold (e.g. x and y are a pressure variable), then this function is not
+    appropriate. See:
+    https://doi.org/10.1175/1520-0450(1994)033<0694:ITIIEA>2.0.CO;2
+    The time dimension, if present, is reduced to the intersection of the time
+    coordiantes of each dataset, if necessary. When this happens, a warning is
+    raised.
+
+    Parameters
+    ----------
+    x  : xarray DataArray
+        A dataset to horizontally remap, with at least dimensions 'lat', 'lon',
+        and 'lev'
+    xv : xarray DataArray
+        The gridded variable for the new vertical levels (either pressure or
+        potential temperature) corresponding to dataset x.
+    y  : xarray DataArray
+        A dataset on the destination horizontal grid, with at least dimensions
+        'lat, 'lon', and 'lev'
+    yv : xarray DataArray
+        The gridded variable for the new vertical levels (either pressure or
+        potential temperature) corresponding to dataset y
+    v : array-like
+        The desired levels of the destination vertical grid, with units matching
+        that of xv and yv
+    vertical : str, optional
+        The type of vertical coordinate. Currently supports either 'pressure' or
+        'theta'. If 'pressure', then xv, yv, and v must be provided in Pa, and a
+        logarithmic interpolation is used. If 'theta', then xv, yv, and v must be
+        provided in K, and a linear interpolation is used. That is, it is assumed
+        that the quantities x and y vary approximately linearly across isentropes.
+    '''
+
+    # Verify dimensions, transpose to matching order
+    if(set(x.dims) != set(y.dims) or set(xv.dims) != set(yv.dims) or \
+       set(x.dims) != set(xv.dims)):
+        raise RuntimeError('Datasets x, xv, y, and yv must all have the same dimensions')
+    x  = x.transpose(*y.dims)
+    yv = yv.transpose(*y.dims)
+    xv = xv.transpose(*y.dims)
+
+    # Verify matching coordinates
+    for dim in x.dims:
+        if(not arrays_equal(x[dim], xv[dim])):
+            raise RuntimeError(f'Coordinates of x and xv must match in dimension {dim}')
+        if(not arrays_equal(y[dim], yv[dim])):
+            raise RuntimeError(f'Coordinates of y and yv must match in dimension {dim}')
+        if(not arrays_equal(x[dim], y[dim])):
+            if(dim in ['lat', 'lon', 'lev']):
+                continue
+            elif(dim != 'time'):
+                raise RuntimeError(f'Coordinates of x and y must match in dimension {dim}')
+            else:
+                warnings.warn('Datasets x and y do not have matching coordiantes in the time'\
+                              'time dimension; reindexing each to their intersection.')
+                time = x.time.to_index().intersection(y.time.to_index())
+                x    = x.reindex(time=time)
+                xv   = xv.reindex(time=time)
+                y    = y.reindex(time=time)
+                yv   = yv.reindex(time=time)
+
+    # do horizontal interpolation x -> y, xv -> y
+    print('doing horizontal regrid (1/2)...')
+    x  = conservative_regrid(y, x)
+    print('doing horizontal regrid (2/2)...')
+    xv = conservative_regrid(y, xv)
+
+    # do vertical interpolation
+    if(vertical == 'pressure'):
+        print('doing vertical remap (1/2)...')
+        x = log_interp_to_isobars(x, xv, v)
+        print('doing vertical remap (2/2)...')
+        y = log_interp_to_isobars(y, yv, v)
+    elif(vertical == 'theta'):
+        print('doing vertical remap (1/2)...')
+        x = linear_interp_to_isentropes(x, xv, v)
+        print('doing vertical remap (2/2)...')
+        y = linear_interp_to_isentropes(y, yv, v)
+
+    return x, y
 
 
 # -------------------------------------------------------------
